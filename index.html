@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Interactive Drone Knowledge Graph viewer" />
+  <title>Drone Knowledge Graph</title>
+  <link rel="stylesheet" href="./style.css?v=20261002-2" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Drone Knowledge Graph</h1>
+      <p>Entity · Relationship · Semantic Zoom Viewer</p>
+    </div>
+    <div class="status-pill" id="load-status">Loading graph…</div>
+  </header>
+
+  <main class="layout">
+    <section class="workspace">
+      <div class="stats" aria-label="Graph statistics">
+        <div><span>Entities</span><strong id="stat-nodes">—</strong></div>
+        <div><span>Relationships</span><strong id="stat-edges">—</strong></div>
+        <div><span>Communities</span><strong id="stat-communities">—</strong></div>
+        <div><span>Visible detail</span><strong id="stat-lod">Overview</strong></div>
+      </div>
+
+      <div class="toolbar">
+        <div class="search-wrap">
+          <label for="search">Entity search</label>
+          <input id="search" type="search" placeholder="예: MQ-9 Reaper, UAV, 무인기" autocomplete="off" />
+          <div id="search-results" class="search-results" hidden></div>
+        </div>
+
+        <label class="control-group">
+          <span>Detail</span>
+          <select id="detail-mode">
+            <option value="auto">Auto (zoom)</option>
+            <option value="0">Overview</option>
+            <option value="1">Medium</option>
+            <option value="2">Close</option>
+            <option value="3">Full</option>
+          </select>
+        </label>
+
+        <label class="control-group">
+          <span>Type</span>
+          <select id="type-filter">
+            <option value="ALL">All types</option>
+          </select>
+        </label>
+
+        <div class="button-group" aria-label="Zoom controls">
+          <button id="zoom-in" type="button" title="Zoom in">＋</button>
+          <button id="zoom-out" type="button" title="Zoom out">−</button>
+          <button id="reset-view" type="button">Reset</button>
+        </div>
+      </div>
+
+      <div class="graph-shell">
+        <div id="graph-stage" class="graph-stage" aria-label="Interactive knowledge graph">
+          <canvas id="community-layer" aria-hidden="true"></canvas>
+          <div id="sigma-container"></div>
+          <div id="graph-help" class="graph-help">
+            Wheel: zoom · Drag: pan · Click node/relationship: details
+          </div>
+        </div>
+      </div>
+      <div id="graph-error" class="graph-error" hidden role="alert"></div>
+
+      <div class="legend-row">
+        <div class="legend" id="type-legend"></div>
+        <div class="zoom-readout">Zoom ×<span id="zoom-factor">1.0</span></div>
+      </div>
+
+      <div class="note" id="community-note">
+        Community 데이터가 아직 없으면 Entity/Relationship만 표시합니다. 나중에 communities.jsonl이 생성되면 같은 Viewer가 연한 Community 배경을 자동으로 표시합니다.
+      </div>
+    </section>
+
+    <aside class="details" aria-live="polite">
+      <div class="details-kicker" id="details-kind">Selection</div>
+      <h2 id="details-title">노드 또는 관계를 클릭하세요</h2>
+      <div id="details-body" class="details-body">
+        <p class="muted">확대할수록 더 작은 Entity와 Relationship이 단계적으로 나타납니다.</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer>
+    <span>Graph source: Graph_RAG_Drones extraction artifacts</span>
+    <span>Renderer: Sigma.js + Graphology · Viewer build 2026-10-02 v2</span>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/graphology@0.26.0/dist/graphology.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sigma@3.0.3/dist/sigma.min.js"></script>
+  <script src="./app.js?v=20261002-2"></script>
+</body>
+</html>
