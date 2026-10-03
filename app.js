@@ -54,7 +54,11 @@
     communityMap: new Map(),
     searchMatch: null,
     communityHulls: [],
+    communityHullById: new Map(),
+    communityFrontiers: [],
     communityFrame: 0,
+    layoutMode: "kg",
+    zoomFactor: 1,
   };
 
   const detailNames = ["Overview", "Medium", "Close", "Full"];
@@ -80,14 +84,18 @@
     return String(value || "").normalize("NFKC").toLocaleLowerCase();
   }
 
-  function colorForCommunity(id, alpha) {
+  function communityHue(id) {
     let hash = 2166136261;
-    for (let i = 0; i < id.length; i++) {
-      hash ^= id.charCodeAt(i);
+    const text = String(id || "community");
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
       hash = Math.imul(hash, 16777619);
     }
-    const hue = Math.abs(hash) % 360;
-    return `hsla(${hue}, 52%, 60%, ${alpha})`;
+    return Math.abs(hash) % 360;
+  }
+
+  function colorForCommunity(id, alpha, lightness = 60, saturation = 52) {
+    return `hsla(${communityHue(id)}, ${saturation}%, ${lightness}%, ${alpha})`;
   }
 
   function convexHull(points) {
@@ -112,32 +120,74 @@
     return lower.concat(upper);
   }
 
+  function hullDescriptor(community, nodeIds, { frontierLevel = null } = {}) {
+    const points = [];
+    for (const nodeId of nodeIds || []) {
+      if (!state.graph.hasNode(nodeId)) continue;
+      const a = state.graph.getNodeAttributes(nodeId);
+      points.push({ x: a.x, y: a.y });
+    }
+    if (!points.length) return null;
+    const hull = points.length >= 3 ? convexHull(points) : points.slice();
+    return {
+      id: String(community.community_id || "community"),
+      title: String(community.title || community.community_id || "Community"),
+      level: Number(community.level || 0),
+      size: points.length,
+      fullSize: Number(community.size || (community.nodes || []).length || points.length),
+      parentId: community.parent_id || null,
+      rootId: community.root_id || community.community_id,
+      summary: community.summary || "",
+      frontierLevel,
+      hull,
+    };
+  }
+
+  // Builds two structures for the *current layout*:
+  // 1) full hulls for every Leiden community (used when a community is selected)
+  // 2) hierarchy frontiers for depth 0..N. Every entity belongs to exactly one
+  //    visible frontier group: its deepest available community whose level <= depth.
+  // This prevents entities from losing their community background when a branch ends
+  // before Level 3.
   function buildCommunityHulls() {
     state.communityHulls = [];
-    const communities = state.payload.communities || [];
-    if (!communities.length) return;
+    state.communityHullById = new Map();
+    state.communityFrontiers = [];
+    const communities = state.payload?.communities || [];
+    if (!communities.length || !state.graph) return;
 
+    let maxLevel = 0;
     for (const community of communities) {
-      const points = [];
-      for (const nodeId of community.nodes || []) {
-        if (!state.graph.hasNode(nodeId)) continue;
-        const a = state.graph.getNodeAttributes(nodeId);
-        points.push({ x: a.x, y: a.y });
+      maxLevel = Math.max(maxLevel, Number(community.level || 0));
+      const descriptor = hullDescriptor(community, community.nodes || []);
+      if (!descriptor) continue;
+      state.communityHulls.push(descriptor);
+      state.communityHullById.set(descriptor.id, descriptor);
+    }
+
+    const graphNodes = state.graph.nodes();
+    for (let depth = 0; depth <= maxLevel; depth++) {
+      const grouped = new Map();
+      for (const nodeId of graphNodes) {
+        const attrs = state.graph.getNodeAttributes(nodeId);
+        const memberships = (attrs.communities || [])
+          .filter((c) => Number(c.level || 0) <= depth)
+          .sort((a, b) => Number(a.level || 0) - Number(b.level || 0));
+        if (!memberships.length) continue;
+        const chosen = memberships[memberships.length - 1];
+        const id = String(chosen.id);
+        if (!grouped.has(id)) grouped.set(id, []);
+        grouped.get(id).push(nodeId);
       }
-      if (!points.length) continue;
-      // Convex hull first in graph coordinates. For one/two-node communities, keep the raw points
-      // so the renderer can draw a halo/capsule instead of dropping the community.
-      const hull = points.length >= 3 ? convexHull(points) : points.slice();
-      state.communityHulls.push({
-        id: String(community.community_id || "community"),
-        title: String(community.title || community.community_id || "Community"),
-        level: Number(community.level || 0),
-        size: points.length,
-        parentId: community.parent_id || null,
-        rootId: community.root_id || community.community_id,
-        summary: community.summary || "",
-        hull,
-      });
+
+      const frontier = [];
+      for (const [id, nodeIds] of grouped) {
+        const community = state.communityMap.get(id);
+        if (!community) continue;
+        const descriptor = hullDescriptor(community, nodeIds, { frontierLevel: depth });
+        if (descriptor) frontier.push(descriptor);
+      }
+      state.communityFrontiers[depth] = frontier;
     }
   }
 
@@ -148,9 +198,95 @@
 
   function activeCommunityLevel() {
     if (state.communityLevelMode !== "auto") return Number(state.communityLevelMode);
-    const levels = [...new Set(state.communityHulls.map((c) => c.level))].sort((a, b) => a - b);
-    if (!levels.length) return 0;
-    return levels[Math.min(state.currentLod, levels.length - 1)];
+    const maxLevel = Math.max(0, state.communityFrontiers.length - 1);
+    return Math.min(state.currentLod, maxLevel);
+  }
+
+  function makePolygonPath(ctx, points) {
+    if (!points.length) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.closePath();
+  }
+
+  function drawGradientCommunity(ctx, community, viewportPoints, selected) {
+    const cx = viewportPoints.reduce((sum, p) => sum + p.x, 0) / viewportPoints.length;
+    const cy = viewportPoints.reduce((sum, p) => sum + p.y, 0) / viewportPoints.length;
+    const centerAlpha = selected ? 0.30 : 0.19;
+    const midAlpha = selected ? 0.17 : 0.10;
+    const edgeAlpha = selected ? 0.075 : 0.025;
+    const outlineAlpha = selected ? 0.78 : 0.22;
+
+    if (viewportPoints.length === 1) {
+      const radius = selected ? 30 : 22;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+      g.addColorStop(0, colorForCommunity(community.id, centerAlpha, 55));
+      g.addColorStop(0.48, colorForCommunity(community.id, midAlpha, 62));
+      g.addColorStop(0.82, colorForCommunity(community.id, edgeAlpha, 70));
+      g.addColorStop(1, colorForCommunity(community.id, 0, 76));
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = colorForCommunity(community.id, outlineAlpha, 54);
+      ctx.lineWidth = selected ? 2.5 : 0.9;
+      ctx.stroke();
+      return { cx, cy };
+    }
+
+    if (viewportPoints.length === 2) {
+      const [a, b] = viewportPoints;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const radius = selected ? 26 : 19;
+      const angle = Math.atan2(dy, dx);
+      const rx = distance / 2 + radius;
+      const ry = radius;
+      const gRadius = Math.max(rx, ry) * 1.05;
+      const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, gRadius);
+      g.addColorStop(0, colorForCommunity(community.id, centerAlpha, 55));
+      g.addColorStop(0.50, colorForCommunity(community.id, midAlpha, 62));
+      g.addColorStop(0.84, colorForCommunity(community.id, edgeAlpha, 70));
+      g.addColorStop(1, colorForCommunity(community.id, 0, 76));
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, angle, 0, Math.PI * 2);
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = colorForCommunity(community.id, outlineAlpha, 54);
+      ctx.lineWidth = selected ? 2.5 : 0.9;
+      ctx.stroke();
+      return { cx, cy };
+    }
+
+    const rawRadius = Math.max(...viewportPoints.map((p) => Math.hypot(p.x - cx, p.y - cy)), 1);
+    const padding = selected ? 24 : 17;
+    const scale = 1 + padding / rawRadius;
+    const inflated = viewportPoints.map((p) => ({
+      x: cx + (p.x - cx) * scale,
+      y: cy + (p.y - cy) * scale,
+    }));
+    const radius = rawRadius + padding;
+    const xs = inflated.map((p) => p.x), ys = inflated.map((p) => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+
+    ctx.save();
+    makePolygonPath(ctx, inflated);
+    ctx.clip();
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+    g.addColorStop(0, colorForCommunity(community.id, centerAlpha, 55));
+    g.addColorStop(0.42, colorForCommunity(community.id, midAlpha, 62));
+    g.addColorStop(0.76, colorForCommunity(community.id, edgeAlpha, 70));
+    g.addColorStop(1, colorForCommunity(community.id, 0, 76));
+    ctx.fillStyle = g;
+    ctx.fillRect(minX - 2, minY - 2, maxX - minX + 4, maxY - minY + 4);
+    ctx.restore();
+
+    makePolygonPath(ctx, inflated);
+    ctx.strokeStyle = colorForCommunity(community.id, outlineAlpha, 54);
+    ctx.lineWidth = selected ? 2.6 : 0.9;
+    ctx.stroke();
+    return { cx, cy };
   }
 
   function drawCommunities() {
@@ -170,79 +306,55 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
     if (state.viewMode !== "community") return;
-    if (!state.renderer || !state.communityHulls.length) return;
+    if (!state.renderer || !state.communityFrontiers.length) return;
 
     const targetLevel = activeCommunityLevel();
+    const frontier = state.communityFrontiers[targetLevel] || [];
     const candidates = [];
-    for (const community of state.communityHulls) {
-      if (community.level !== targetLevel && community.id !== state.selectedCommunity) continue;
+    const zoomFactor = state.zoomFactor || 1;
+    const addCandidate = (community, selected = false) => {
       const viewportPoints = community.hull.map((p) => state.renderer.graphToViewport(p));
-      if (!viewportPoints.length) continue;
+      if (!viewportPoints.length) return;
       const xs = viewportPoints.map((p) => p.x);
       const ys = viewportPoints.map((p) => p.y);
       const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-      const margin = 80;
-      if (maxX < -margin || minX > width + margin || maxY < -margin || minY > height + margin) continue;
-      candidates.push({ community, viewportPoints, area: Math.max(1, (maxX-minX)*(maxY-minY)) });
+      const margin = 90;
+      if (maxX < -margin || minX > width + margin || maxY < -margin || minY > height + margin) return;
+      const span = Math.max(maxX - minX, maxY - minY);
+      if (!selected) {
+        // Tiny/singleton communities are visually meaningless at overview scale and
+        // expensive to paint. They appear naturally as the user zooms closer.
+        if (community.size === 1 && zoomFactor < 1.9 && targetLevel <= 1) return;
+        if (span < 3.5 && zoomFactor < 3.5) return;
+      }
+      candidates.push({ community, viewportPoints, area: Math.max(1, (maxX - minX) * (maxY - minY)), selected });
+    };
+
+    for (const community of frontier) addCandidate(community, community.id === state.selectedCommunity);
+    if (state.selectedCommunity && !frontier.some((c) => c.id === state.selectedCommunity)) {
+      const selectedHull = state.communityHullById.get(state.selectedCommunity);
+      if (selectedHull) addCandidate(selectedHull, true);
     }
-    candidates.sort((a,b) => (b.community.id === state.selectedCommunity) - (a.community.id === state.selectedCommunity) || b.area-a.area);
-    const visible = candidates.slice(0, 240);
+
+    candidates.sort((a, b) => Number(b.selected) - Number(a.selected) || b.area - a.area);
+    const maxDraw = targetLevel === 0 ? 700 : targetLevel === 1 ? 850 : targetLevel === 2 ? 1000 : 1200;
+    const visible = candidates.slice(0, maxDraw);
+    // Draw larger regions first so smaller/finer frontier groups remain legible on top.
+    visible.sort((a, b) => Number(a.selected) - Number(b.selected) || b.area - a.area);
 
     for (const item of visible) {
-      const community = item.community;
-      const viewportPoints = item.viewportPoints;
-      const cx = viewportPoints.reduce((sum, p) => sum + p.x, 0) / viewportPoints.length;
-      const cy = viewportPoints.reduce((sum, p) => sum + p.y, 0) / viewportPoints.length;
-      const selected = community.id === state.selectedCommunity;
-      const fill = colorForCommunity(community.id, selected ? 0.20 : 0.10);
-      const stroke = colorForCommunity(community.id, selected ? 0.80 : 0.34);
-      if (viewportPoints.length === 1) {
-        ctx.beginPath();
-        ctx.arc(viewportPoints[0].x, viewportPoints[0].y, selected ? 24 : 17, 0, Math.PI * 2);
-        ctx.fillStyle = fill;
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = selected ? 3 : 1.25;
-        ctx.fill();
-        ctx.stroke();
-      } else if (viewportPoints.length === 2) {
-        ctx.beginPath();
-        ctx.moveTo(viewportPoints[0].x, viewportPoints[0].y);
-        ctx.lineTo(viewportPoints[1].x, viewportPoints[1].y);
-        ctx.lineCap = "round";
-        ctx.strokeStyle = fill;
-        ctx.lineWidth = selected ? 40 : 30;
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(viewportPoints[0].x, viewportPoints[0].y);
-        ctx.lineTo(viewportPoints[1].x, viewportPoints[1].y);
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = selected ? 3 : 1.25;
-        ctx.stroke();
-        ctx.lineCap = "butt";
-      } else {
-        const inflated = viewportPoints.map((p) => ({
-          x: cx + (p.x - cx) * 1.055,
-          y: cy + (p.y - cy) * 1.055,
-        }));
-        ctx.beginPath();
-        ctx.moveTo(inflated[0].x, inflated[0].y);
-        for (let i = 1; i < inflated.length; i++) ctx.lineTo(inflated[i].x, inflated[i].y);
-        ctx.closePath();
-        ctx.fillStyle = fill;
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = selected ? 3 : 1.25;
-        ctx.fill();
-        ctx.stroke();
-      }
-
-      const minLabelSize = targetLevel === 0 ? 8 : targetLevel === 1 ? 5 : 3;
+      const { community, viewportPoints, selected } = item;
+      const center = drawGradientCommunity(ctx, community, viewportPoints, selected);
+      if (!center) continue;
+      const minLabelSize = targetLevel === 0 ? 15 : targetLevel === 1 ? 8 : targetLevel === 2 ? 5 : 3;
       if (selected || community.size >= minLabelSize) {
         ctx.font = selected ? "700 13px system-ui, sans-serif" : "600 11px system-ui, sans-serif";
-        ctx.fillStyle = colorForCommunity(community.id, selected ? 0.96 : 0.82);
+        ctx.fillStyle = colorForCommunity(community.id, selected ? 0.98 : 0.84, 32, 48);
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        const label = community.title.length > 58 ? `${community.title.slice(0,55)}…` : community.title;
-        ctx.fillText(label, cx, cy);
+        const raw = `L${community.level} · ${community.title}`;
+        const label = raw.length > 62 ? `${raw.slice(0, 59)}…` : raw;
+        ctx.fillText(label, center.cx, center.cy);
       }
     }
   }
@@ -258,6 +370,7 @@
     if (!state.renderer) return;
     const ratio = state.renderer.getCamera().getState().ratio;
     const zoomFactor = state.initialRatio / Math.max(ratio, 1e-9);
+    state.zoomFactor = zoomFactor;
     state.autoLod = autoLodForZoom(zoomFactor);
     state.currentLod = state.detailMode === "auto" ? state.autoLod : Number(state.detailMode);
     ui.zoomFactor.textContent = zoomFactor.toFixed(1);
@@ -541,10 +654,33 @@
     }
   }
 
-  function setViewMode(mode, { updateHash = true, resetCommunitySelection = true } = {}) {
+  function applyLayout(mode, { resetCamera = true } = {}) {
+    if (!state.graph || !state.renderer) return;
+    const target = mode === "community" ? "community" : "kg";
+    if (state.layoutMode === target) return;
+    state.layoutMode = target;
+
+    for (const nodeId of state.graph.nodes()) {
+      const a = state.graph.getNodeAttributes(nodeId);
+      const x = target === "community" ? a.communityX : a.kgX;
+      const y = target === "community" ? a.communityY : a.kgY;
+      state.graph.mergeNodeAttributes(nodeId, { x, y });
+    }
+
+    // A full refresh recomputes Sigma's spatial index/normalization for the new fixed layout.
+    state.renderer.refresh();
+    buildCommunityHulls();
+    scheduleCommunityDraw();
+    if (resetCamera) {
+      state.renderer.getCamera().animatedReset({ duration: 420 });
+    }
+  }
+
+  function setViewMode(mode, { updateHash = true, resetCommunitySelection = true, resetCamera = true } = {}) {
     const next = mode === "community" ? "community" : "kg";
     state.viewMode = next;
     document.body.dataset.view = next;
+    applyLayout(next, { resetCamera });
 
     const isCommunity = next === "community";
     ui.modeKG.classList.toggle("active", !isCommunity);
@@ -556,14 +692,14 @@
     ui.communityCanvas.hidden = !isCommunity;
 
     if (isCommunity) {
-      ui.pageSubtitle.textContent = "Entity · Relationship · Hierarchical Leiden Community · Semantic Zoom";
+      ui.pageSubtitle.textContent = "Entity · Relationship · Hierarchical Leiden Community · Frontier Semantic Zoom";
       ui.communityStatLabel.textContent = "Communities";
       ui.statCommunities.textContent = state.payload?.meta?.has_communities
         ? fmt.format(state.payload.meta.community_count || 0)
         : "Pending";
-      ui.graphHelp.textContent = "Wheel: zoom · Drag: pan · Click node/relationship: details · Community level changes with zoom";
+      ui.graphHelp.textContent = "Wheel: zoom · Drag: pan · Community frontier changes with zoom · Node positions stay fixed";
       ui.viewNote.textContent = state.payload?.meta?.has_communities
-        ? `Community KG 모드입니다. Hierarchical Leiden Community ${fmt.format(state.payload.meta.community_count || 0)}개를 배경으로 표시하며, Auto에서는 확대할수록 Level 0 → 1 → 2 → 3으로 전환됩니다.`
+        ? `Community KG 모드입니다. 같은 Community의 Entity가 공간적으로 가까워지도록 별도 고정 layout을 사용합니다. Auto에서는 확대할수록 각 Entity가 가진 가장 깊은 Community까지만 L0 → L1 → L2 → L3으로 세분화되는 hierarchy frontier를 표시합니다.`
         : "Community KG 모드이지만 Community 데이터가 없습니다.";
     } else {
       ui.pageSubtitle.textContent = "Entity · Relationship · Semantic Zoom";
@@ -620,6 +756,10 @@
         label: node.label,
         x: node.x,
         y: node.y,
+        kgX: node.x,
+        kgY: node.y,
+        communityX: Number.isFinite(node.community_x) ? node.community_x : node.x,
+        communityY: Number.isFinite(node.community_y) ? node.community_y : node.y,
         size: node.size,
         color: node.color,
         entityType: node.type,
@@ -694,10 +834,10 @@
       state.initialRatio = renderer.getCamera().getState().ratio || 1;
       installReducers();
       buildCommunityHulls();
-      updateZoomState();
 
       const initialMode = location.hash.toLowerCase() === "#community" ? "community" : "kg";
-      setViewMode(initialMode, { updateHash: false, resetCommunitySelection: false });
+      setViewMode(initialMode, { updateHash: false, resetCommunitySelection: false, resetCamera: false });
+      updateZoomState();
 
       renderer.on("clickNode", ({ node }) => selectNode(node));
       renderer.on("clickEdge", ({ edge }) => selectEdge(edge));
@@ -747,7 +887,7 @@
 
       ui.graphError.hidden = true;
       ui.graphError.style.display = "none";
-      ui.loadStatus.textContent = payload.meta.has_communities ? "Graph + communities ready · v1" : "Graph ready · communities pending";
+      ui.loadStatus.textContent = payload.meta.has_communities ? "Graph + hierarchy frontier ready · v2" : "Graph ready · communities pending";
     } catch (error) {
       console.error(error);
       const fileHint = location.protocol === "file:"

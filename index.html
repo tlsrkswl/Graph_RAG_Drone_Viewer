@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="Interactive Drone Knowledge Graph and hierarchical Leiden Community viewer" />
   <title>Drone Knowledge Graph Viewer</title>
-  <link rel="stylesheet" href="./style.css?v=20261003-combined-1" />
+  <link rel="stylesheet" href="./style.css?v=20261003-community-frontier-2" />
 </head>
 <body data-view="kg">
   <header class="topbar">
@@ -66,10 +66,10 @@
           <span>Community level</span>
           <select id="community-level">
             <option value="auto">Auto (zoom)</option>
-            <option value="0">Level 0 · Root</option>
-            <option value="1">Level 1</option>
-            <option value="2">Level 2</option>
-            <option value="3">Level 3 · Detail</option>
+            <option value="0">Frontier L0 · Root</option>
+            <option value="1">Frontier L1</option>
+            <option value="2">Frontier L2</option>
+            <option value="3">Frontier L3 · Detail</option>
           </select>
         </label>
 
@@ -112,11 +112,11 @@
 
   <footer>
     <span>Graph source: knowledge_graph.json + communities.jsonl + community_reports.jsonl</span>
-    <span>Renderer: Sigma.js + Graphology · Combined Viewer build 2026-10-03 v1</span>
+    <span>Renderer: Sigma.js + Graphology · Community Frontier build 2026-10-03 v2</span>
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/graphology@0.26.0/dist/graphology.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sigma@3.0.3/dist/sigma.min.js"></script>
-  <script src="./app.js?v=20261003-combined-1"></script>
+  <script src="./app.js?v=20261003-community-frontier-2"></script>
 </body>
 </html>
