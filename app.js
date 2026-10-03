@@ -12,6 +12,7 @@
     searchResults: $("search-results"),
     detailMode: $("detail-mode"),
     typeFilter: $("type-filter"),
+    communityLevel: $("community-level"),
     zoomIn: $("zoom-in"),
     zoomOut: $("zoom-out"),
     reset: $("reset-view"),
@@ -21,7 +22,14 @@
     graphError: $("graph-error"),
     legend: $("type-legend"),
     zoomFactor: $("zoom-factor"),
-    communityNote: $("community-note"),
+    viewNote: $("view-note"),
+    modeKG: $("mode-kg"),
+    modeCommunity: $("mode-community"),
+    pageTitle: $("page-title"),
+    pageSubtitle: $("page-subtitle"),
+    graphHelp: $("graph-help"),
+    communityStatLabel: $("community-stat-label"),
+    communityLevelControl: $("community-level-control"),
     detailsKind: $("details-kind"),
     detailsTitle: $("details-title"),
     detailsBody: $("details-body"),
@@ -30,6 +38,7 @@
   const state = {
     payload: null,
     graph: null,
+    viewMode: "kg",
     renderer: null,
     initialRatio: 1,
     autoLod: 0,
@@ -40,6 +49,9 @@
     selectedEdge: null,
     selectedNeighbors: new Set(),
     selectedIncidentEdges: new Set(),
+    selectedCommunity: null,
+    communityLevelMode: "auto",
+    communityMap: new Map(),
     searchMatch: null,
     communityHulls: [],
     communityFrame: 0,
@@ -112,15 +124,18 @@
         const a = state.graph.getNodeAttributes(nodeId);
         points.push({ x: a.x, y: a.y });
       }
-      if (points.length < 3) continue;
-      // Convex hull first in graph coordinates: camera redraw then transforms only hull vertices.
-      const hull = convexHull(points);
-      if (hull.length < 3) continue;
+      if (!points.length) continue;
+      // Convex hull first in graph coordinates. For one/two-node communities, keep the raw points
+      // so the renderer can draw a halo/capsule instead of dropping the community.
+      const hull = points.length >= 3 ? convexHull(points) : points.slice();
       state.communityHulls.push({
         id: String(community.community_id || "community"),
         title: String(community.title || community.community_id || "Community"),
         level: Number(community.level || 0),
         size: points.length,
+        parentId: community.parent_id || null,
+        rootId: community.root_id || community.community_id,
+        summary: community.summary || "",
         hull,
       });
     }
@@ -129,6 +144,13 @@
   function scheduleCommunityDraw() {
     if (state.communityFrame) cancelAnimationFrame(state.communityFrame);
     state.communityFrame = requestAnimationFrame(drawCommunities);
+  }
+
+  function activeCommunityLevel() {
+    if (state.communityLevelMode !== "auto") return Number(state.communityLevelMode);
+    const levels = [...new Set(state.communityHulls.map((c) => c.level))].sort((a, b) => a - b);
+    if (!levels.length) return 0;
+    return levels[Math.min(state.currentLod, levels.length - 1)];
   }
 
   function drawCommunities() {
@@ -147,43 +169,80 @@
     const ctx = canvas.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, width, height);
+    if (state.viewMode !== "community") return;
     if (!state.renderer || !state.communityHulls.length) return;
 
-    const levels = [...new Set(state.communityHulls.map((c) => c.level))].sort((a, b) => a - b);
-    if (!levels.length) return;
-    const levelIndex = Math.min(state.currentLod, levels.length - 1);
-    const targetLevel = levels[levelIndex];
-    const visible = state.communityHulls
-      .filter((c) => c.level === targetLevel)
-      .sort((a, b) => b.size - a.size)
-      .slice(0, 80);
-
-    for (const community of visible) {
+    const targetLevel = activeCommunityLevel();
+    const candidates = [];
+    for (const community of state.communityHulls) {
+      if (community.level !== targetLevel && community.id !== state.selectedCommunity) continue;
       const viewportPoints = community.hull.map((p) => state.renderer.graphToViewport(p));
-      if (viewportPoints.length < 3) continue;
-      const cx = viewportPoints.reduce((s, p) => s + p.x, 0) / viewportPoints.length;
-      const cy = viewportPoints.reduce((s, p) => s + p.y, 0) / viewportPoints.length;
-      // Inflate a little so the color acts as a background rather than touching node centers.
-      const inflated = viewportPoints.map((p) => ({
-        x: cx + (p.x - cx) * 1.055,
-        y: cy + (p.y - cy) * 1.055,
-      }));
-      ctx.beginPath();
-      ctx.moveTo(inflated[0].x, inflated[0].y);
-      for (let i = 1; i < inflated.length; i++) ctx.lineTo(inflated[i].x, inflated[i].y);
-      ctx.closePath();
-      ctx.fillStyle = colorForCommunity(community.id, 0.10);
-      ctx.strokeStyle = colorForCommunity(community.id, 0.28);
-      ctx.lineWidth = 1.25;
-      ctx.fill();
-      ctx.stroke();
+      if (!viewportPoints.length) continue;
+      const xs = viewportPoints.map((p) => p.x);
+      const ys = viewportPoints.map((p) => p.y);
+      const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+      const margin = 80;
+      if (maxX < -margin || minX > width + margin || maxY < -margin || minY > height + margin) continue;
+      candidates.push({ community, viewportPoints, area: Math.max(1, (maxX-minX)*(maxY-minY)) });
+    }
+    candidates.sort((a,b) => (b.community.id === state.selectedCommunity) - (a.community.id === state.selectedCommunity) || b.area-a.area);
+    const visible = candidates.slice(0, 240);
 
-      if (state.currentLod <= 1 && community.size >= 4) {
-        ctx.font = "600 12px system-ui, sans-serif";
-        ctx.fillStyle = colorForCommunity(community.id, 0.78);
+    for (const item of visible) {
+      const community = item.community;
+      const viewportPoints = item.viewportPoints;
+      const cx = viewportPoints.reduce((sum, p) => sum + p.x, 0) / viewportPoints.length;
+      const cy = viewportPoints.reduce((sum, p) => sum + p.y, 0) / viewportPoints.length;
+      const selected = community.id === state.selectedCommunity;
+      const fill = colorForCommunity(community.id, selected ? 0.20 : 0.10);
+      const stroke = colorForCommunity(community.id, selected ? 0.80 : 0.34);
+      if (viewportPoints.length === 1) {
+        ctx.beginPath();
+        ctx.arc(viewportPoints[0].x, viewportPoints[0].y, selected ? 24 : 17, 0, Math.PI * 2);
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = selected ? 3 : 1.25;
+        ctx.fill();
+        ctx.stroke();
+      } else if (viewportPoints.length === 2) {
+        ctx.beginPath();
+        ctx.moveTo(viewportPoints[0].x, viewportPoints[0].y);
+        ctx.lineTo(viewportPoints[1].x, viewportPoints[1].y);
+        ctx.lineCap = "round";
+        ctx.strokeStyle = fill;
+        ctx.lineWidth = selected ? 40 : 30;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(viewportPoints[0].x, viewportPoints[0].y);
+        ctx.lineTo(viewportPoints[1].x, viewportPoints[1].y);
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = selected ? 3 : 1.25;
+        ctx.stroke();
+        ctx.lineCap = "butt";
+      } else {
+        const inflated = viewportPoints.map((p) => ({
+          x: cx + (p.x - cx) * 1.055,
+          y: cy + (p.y - cy) * 1.055,
+        }));
+        ctx.beginPath();
+        ctx.moveTo(inflated[0].x, inflated[0].y);
+        for (let i = 1; i < inflated.length; i++) ctx.lineTo(inflated[i].x, inflated[i].y);
+        ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = selected ? 3 : 1.25;
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      const minLabelSize = targetLevel === 0 ? 8 : targetLevel === 1 ? 5 : 3;
+      if (selected || community.size >= minLabelSize) {
+        ctx.font = selected ? "700 13px system-ui, sans-serif" : "600 11px system-ui, sans-serif";
+        ctx.fillStyle = colorForCommunity(community.id, selected ? 0.96 : 0.82);
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(community.title, cx, cy);
+        const label = community.title.length > 58 ? `${community.title.slice(0,55)}…` : community.title;
+        ctx.fillText(label, cx, cy);
       }
     }
   }
@@ -303,11 +362,15 @@
     state.selectedEdge = null;
     state.selectedNeighbors.clear();
     state.selectedIncidentEdges.clear();
+    state.selectedCommunity = null;
     if (!keepSearch) state.searchMatch = null;
     ui.detailsKind.textContent = "Selection";
     ui.detailsTitle.textContent = "노드 또는 관계를 클릭하세요";
-    ui.detailsBody.innerHTML = '<p class="muted">확대할수록 더 작은 Entity와 Relationship이 단계적으로 나타납니다.</p>';
+    ui.detailsBody.innerHTML = state.viewMode === "community"
+      ? '<p class="muted">Community 배경과 계층을 함께 보면서 Entity와 Relationship을 탐색할 수 있습니다.</p>'
+      : '<p class="muted">확대할수록 더 작은 Entity와 Relationship이 단계적으로 나타납니다.</p>';
     state.renderer?.refresh({ skipIndexation: true });
+    scheduleCommunityDraw();
   }
 
   function renderSources(sources) {
@@ -324,9 +387,42 @@
     );
   }
 
+  function selectCommunity(communityId) {
+    if (state.viewMode !== "community") return;
+    const community = state.communityMap.get(communityId);
+    if (!community) return;
+    state.selectedNode = null;
+    state.selectedEdge = null;
+    state.selectedNeighbors.clear();
+    state.selectedIncidentEdges.clear();
+    state.selectedCommunity = communityId;
+    const parent = community.parent_id ? state.communityMap.get(community.parent_id) : null;
+    const children = (community.children || []).map((id) => state.communityMap.get(id)).filter(Boolean).slice(0, 30);
+    ui.detailsKind.textContent = "Community";
+    ui.detailsTitle.textContent = community.title || community.community_id;
+    ui.detailsBody.innerHTML = `
+      <dl class="meta-grid">
+        <dt>ID</dt><dd>${escapeHtml(community.community_id)}</dd>
+        <dt>Level</dt><dd>${community.level}</dd>
+        <dt>Entities</dt><dd>${fmt.format((community.nodes || []).length)}</dd>
+        <dt>Parent</dt><dd>${parent ? `<button class="community-link" type="button" data-community-id="${escapeHtml(parent.community_id)}">${escapeHtml(parent.title || parent.community_id)}</button>` : "Root community"}</dd>
+        <dt>Children</dt><dd>${fmt.format((community.children || []).length)}</dd>
+      </dl>
+      <div class="section-title">Community summary</div>
+      ${community.summary ? `<p>${escapeHtml(community.summary)}</p>` : '<p class="muted">요약 없음</p>'}
+      ${children.length ? `<div class="section-title">Child communities</div><div>${children.map((c) => `<button class="community-link block-link" type="button" data-community-id="${escapeHtml(c.community_id)}">L${c.level} · ${escapeHtml(c.title || c.community_id)} <span class="muted">(${fmt.format((c.nodes||[]).length)} entities)</span></button>`).join("")}</div>` : ""}
+    `;
+    for (const button of ui.detailsBody.querySelectorAll("[data-community-id]")) {
+      button.addEventListener("click", () => selectCommunity(button.dataset.communityId));
+    }
+    state.renderer?.refresh({ skipIndexation: true });
+    scheduleCommunityDraw();
+  }
+
   function selectNode(nodeId, { focus = false } = {}) {
     if (!state.graph.hasNode(nodeId)) return;
     state.selectedEdge = null;
+    state.selectedCommunity = null;
     state.selectedNode = nodeId;
     state.searchMatch = nodeId;
     state.selectedNeighbors = new Set(state.graph.neighbors(nodeId));
@@ -348,7 +444,7 @@
         <dt>Weighted degree</dt><dd>${fmt.format(data.weightedDegree || 0)}</dd>
         <dt>Mentions</dt><dd>${fmt.format(data.mentionCount || 0)}</dd>
         <dt>LOD</dt><dd>${detailNames[data.lod || 0]}</dd>
-        <dt>Community</dt><dd>${communities.length ? communities.map((c) => escapeHtml(`${c.id} (L${c.level})`)).join("<br>") : "Not available yet"}</dd>
+        ${state.viewMode === "community" ? `<dt>Community</dt><dd>${communities.length ? communities.map((c) => `<button class="community-link" type="button" data-community-id="${escapeHtml(c.id)}">L${c.level} · ${escapeHtml(c.title || c.id)}</button>`).join("<br>") : "Not available"}</dd>` : ""}
       </dl>
       <div class="section-title">Description</div>
       ${descriptions.length ? `<ul class="detail-list">${descriptions.map((d) => `<li>${escapeHtml(d)}</li>`).join("")}</ul>` : '<p class="muted">설명 없음</p>'}
@@ -360,13 +456,20 @@
     for (const button of ui.detailsBody.querySelectorAll("[data-node-id]")) {
       button.addEventListener("click", () => selectNode(button.dataset.nodeId, { focus: true }));
     }
+    if (state.viewMode === "community") {
+      for (const button of ui.detailsBody.querySelectorAll("[data-community-id]")) {
+        button.addEventListener("click", () => selectCommunity(button.dataset.communityId));
+      }
+    }
     state.renderer.refresh({ skipIndexation: true });
+    scheduleCommunityDraw();
     if (focus) focusNode(nodeId);
   }
 
   function selectEdge(edgeId) {
     if (!state.graph.hasEdge(edgeId)) return;
     state.selectedNode = null;
+    state.selectedCommunity = null;
     state.selectedNeighbors.clear();
     state.selectedIncidentEdges.clear();
     state.selectedEdge = edgeId;
@@ -393,6 +496,7 @@
       ${renderSources(data.sources)}
     `;
     state.renderer.refresh({ skipIndexation: true });
+    scheduleCommunityDraw();
   }
 
   function renderSearchResults(query) {
@@ -434,6 +538,56 @@
         state.searchMatch = id;
         selectNode(id, { focus: true });
       });
+    }
+  }
+
+  function setViewMode(mode, { updateHash = true, resetCommunitySelection = true } = {}) {
+    const next = mode === "community" ? "community" : "kg";
+    state.viewMode = next;
+    document.body.dataset.view = next;
+
+    const isCommunity = next === "community";
+    ui.modeKG.classList.toggle("active", !isCommunity);
+    ui.modeCommunity.classList.toggle("active", isCommunity);
+    ui.modeKG.setAttribute("aria-pressed", String(!isCommunity));
+    ui.modeCommunity.setAttribute("aria-pressed", String(isCommunity));
+    ui.communityLevel.disabled = !isCommunity;
+    ui.communityLevelControl.hidden = !isCommunity;
+    ui.communityCanvas.hidden = !isCommunity;
+
+    if (isCommunity) {
+      ui.pageSubtitle.textContent = "Entity · Relationship · Hierarchical Leiden Community · Semantic Zoom";
+      ui.communityStatLabel.textContent = "Communities";
+      ui.statCommunities.textContent = state.payload?.meta?.has_communities
+        ? fmt.format(state.payload.meta.community_count || 0)
+        : "Pending";
+      ui.graphHelp.textContent = "Wheel: zoom · Drag: pan · Click node/relationship: details · Community level changes with zoom";
+      ui.viewNote.textContent = state.payload?.meta?.has_communities
+        ? `Community KG 모드입니다. Hierarchical Leiden Community ${fmt.format(state.payload.meta.community_count || 0)}개를 배경으로 표시하며, Auto에서는 확대할수록 Level 0 → 1 → 2 → 3으로 전환됩니다.`
+        : "Community KG 모드이지만 Community 데이터가 없습니다.";
+    } else {
+      ui.pageSubtitle.textContent = "Entity · Relationship · Semantic Zoom";
+      ui.communityStatLabel.textContent = "Community layer";
+      ui.statCommunities.textContent = "Off";
+      ui.graphHelp.textContent = "Wheel: zoom · Drag: pan · Click node/relationship: details";
+      ui.viewNote.textContent = "Knowledge Graph 모드입니다. Community 배경은 숨기고 Entity와 Relationship만 표시합니다.";
+    }
+
+    if (resetCommunitySelection && state.selectedCommunity) {
+      state.selectedCommunity = null;
+      clearSelection({ keepSearch: true });
+    } else if (state.selectedNode) {
+      selectNode(state.selectedNode);
+    } else if (state.selectedEdge) {
+      selectEdge(state.selectedEdge);
+    }
+
+    state.renderer?.refresh({ skipIndexation: true });
+    scheduleCommunityDraw();
+
+    if (updateHash) {
+      const hash = isCommunity ? "#community" : "#kg";
+      if (location.hash !== hash) history.replaceState(null, "", hash);
     }
   }
 
@@ -508,15 +662,12 @@
       if (!response.ok) throw new Error(`graph.json HTTP ${response.status}`);
       const payload = await response.json();
       state.payload = payload;
+      state.communityMap = new Map((payload.communities || []).map((c) => [c.community_id, c]));
       state.graph = buildGraph(payload);
 
       ui.statNodes.textContent = fmt.format(payload.meta.node_count || state.graph.order);
       ui.statEdges.textContent = fmt.format(payload.meta.edge_count || state.graph.size);
-      ui.statCommunities.textContent = payload.meta.has_communities ? fmt.format(payload.meta.community_count) : "Pending";
       ui.loadStatus.textContent = `${fmt.format(state.graph.order)} entities loaded`;
-      ui.communityNote.textContent = payload.meta.has_communities
-        ? "Community background is active. Zooming changes the hierarchy level shown behind the graph."
-        : "현재 Community 결과 파일은 없습니다. Entity/Relationship은 전체 로드되어 있으며, communities.jsonl이 생성된 뒤 exporter를 다시 실행하면 연한 Community 배경이 자동으로 추가됩니다.";
       populateTypeControls(payload);
 
       const renderer = new window.Sigma(state.graph, ui.container, {
@@ -545,10 +696,19 @@
       buildCommunityHulls();
       updateZoomState();
 
+      const initialMode = location.hash.toLowerCase() === "#community" ? "community" : "kg";
+      setViewMode(initialMode, { updateHash: false, resetCommunitySelection: false });
+
       renderer.on("clickNode", ({ node }) => selectNode(node));
       renderer.on("clickEdge", ({ edge }) => selectEdge(edge));
       renderer.on("clickStage", () => clearSelection({ keepSearch: true }));
       renderer.getCamera().on("updated", updateZoomState);
+
+      ui.modeKG.addEventListener("click", () => setViewMode("kg"));
+      ui.modeCommunity.addEventListener("click", () => setViewMode("community"));
+      window.addEventListener("hashchange", () => {
+        setViewMode(location.hash.toLowerCase() === "#community" ? "community" : "kg", { updateHash: false });
+      });
 
       ui.zoomIn.addEventListener("click", () => renderer.getCamera().animatedZoom(1.7));
       ui.zoomOut.addEventListener("click", () => renderer.getCamera().animatedUnzoom(1.7));
@@ -561,6 +721,10 @@
       ui.detailMode.addEventListener("change", () => {
         state.detailMode = ui.detailMode.value;
         updateZoomState();
+      });
+      ui.communityLevel.addEventListener("change", () => {
+        state.communityLevelMode = ui.communityLevel.value;
+        if (state.viewMode === "community") scheduleCommunityDraw();
       });
       ui.typeFilter.addEventListener("change", () => {
         state.typeFilter = ui.typeFilter.value;
@@ -583,7 +747,7 @@
 
       ui.graphError.hidden = true;
       ui.graphError.style.display = "none";
-      ui.loadStatus.textContent = payload.meta.has_communities ? "Graph + communities ready · v2" : "Graph ready · communities pending · v2";
+      ui.loadStatus.textContent = payload.meta.has_communities ? "Graph + communities ready · v1" : "Graph ready · communities pending";
     } catch (error) {
       console.error(error);
       const fileHint = location.protocol === "file:"

@@ -3,16 +3,28 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Interactive Drone Knowledge Graph viewer" />
-  <title>Drone Knowledge Graph</title>
-  <link rel="stylesheet" href="./style.css?v=20261002-2" />
+  <meta name="description" content="Interactive Drone Knowledge Graph and hierarchical Leiden Community viewer" />
+  <title>Drone Knowledge Graph Viewer</title>
+  <link rel="stylesheet" href="./style.css?v=20261003-combined-1" />
 </head>
-<body>
+<body data-view="kg">
   <header class="topbar">
-    <div>
-      <h1>Drone Knowledge Graph</h1>
-      <p>Entity · Relationship · Semantic Zoom Viewer</p>
+    <div class="brand-block">
+      <h1 id="page-title">Drone Knowledge Graph Viewer</h1>
+      <p id="page-subtitle">Entity · Relationship · Semantic Zoom</p>
     </div>
+
+    <nav class="view-switch" aria-label="Knowledge graph view">
+      <button id="mode-kg" class="view-switch-button active" type="button" aria-pressed="true">
+        <span class="view-switch-title">Knowledge Graph</span>
+        <span class="view-switch-caption">Entity + Relation</span>
+      </button>
+      <button id="mode-community" class="view-switch-button" type="button" aria-pressed="false">
+        <span class="view-switch-title">Community KG</span>
+        <span class="view-switch-caption">KG + Community</span>
+      </button>
+    </nav>
+
     <div class="status-pill" id="load-status">Loading graph…</div>
   </header>
 
@@ -21,7 +33,7 @@
       <div class="stats" aria-label="Graph statistics">
         <div><span>Entities</span><strong id="stat-nodes">—</strong></div>
         <div><span>Relationships</span><strong id="stat-edges">—</strong></div>
-        <div><span>Communities</span><strong id="stat-communities">—</strong></div>
+        <div><span id="community-stat-label">Communities</span><strong id="stat-communities">—</strong></div>
         <div><span>Visible detail</span><strong id="stat-lod">Overview</strong></div>
       </div>
 
@@ -50,6 +62,17 @@
           </select>
         </label>
 
+        <label class="control-group community-only" id="community-level-control">
+          <span>Community level</span>
+          <select id="community-level">
+            <option value="auto">Auto (zoom)</option>
+            <option value="0">Level 0 · Root</option>
+            <option value="1">Level 1</option>
+            <option value="2">Level 2</option>
+            <option value="3">Level 3 · Detail</option>
+          </select>
+        </label>
+
         <div class="button-group" aria-label="Zoom controls">
           <button id="zoom-in" type="button" title="Zoom in">＋</button>
           <button id="zoom-out" type="button" title="Zoom out">−</button>
@@ -59,7 +82,7 @@
 
       <div class="graph-shell">
         <div id="graph-stage" class="graph-stage" aria-label="Interactive knowledge graph">
-          <canvas id="community-layer" aria-hidden="true"></canvas>
+          <canvas id="community-layer" class="community-only-layer" aria-hidden="true"></canvas>
           <div id="sigma-container"></div>
           <div id="graph-help" class="graph-help">
             Wheel: zoom · Drag: pan · Click node/relationship: details
@@ -73,8 +96,8 @@
         <div class="zoom-readout">Zoom ×<span id="zoom-factor">1.0</span></div>
       </div>
 
-      <div class="note" id="community-note">
-        Community 데이터가 아직 없으면 Entity/Relationship만 표시합니다. 나중에 communities.jsonl이 생성되면 같은 Viewer가 연한 Community 배경을 자동으로 표시합니다.
+      <div class="note" id="view-note">
+        Knowledge Graph 모드입니다. 확대할수록 더 작은 Entity와 Relationship이 단계적으로 나타납니다.
       </div>
     </section>
 
@@ -88,12 +111,12 @@
   </main>
 
   <footer>
-    <span>Graph source: Graph_RAG_Drones extraction artifacts</span>
-    <span>Renderer: Sigma.js + Graphology · Viewer build 2026-10-02 v2</span>
+    <span>Graph source: knowledge_graph.json + communities.jsonl + community_reports.jsonl</span>
+    <span>Renderer: Sigma.js + Graphology · Combined Viewer build 2026-10-03 v1</span>
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/graphology@0.26.0/dist/graphology.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sigma@3.0.3/dist/sigma.min.js"></script>
-  <script src="./app.js?v=20261002-2"></script>
+  <script src="./app.js?v=20261003-combined-1"></script>
 </body>
 </html>
