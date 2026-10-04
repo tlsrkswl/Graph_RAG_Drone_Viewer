@@ -59,6 +59,7 @@
     communityFrame: 0,
     layoutMode: "kg",
     zoomFactor: 1,
+    typeLegendHtml: "",
   };
 
   const detailNames = ["Overview", "Medium", "Close", "Full"];
@@ -115,12 +116,53 @@
     return `hsla(${communityHueResolved(id)}, ${saturation}%, ${lightness}%, ${alpha})`;
   }
 
-  function solidColorForCommunity(id, lightness = 47, saturation = 68) {
-    return `hsl(${communityHueResolved(id)}, ${saturation}%, ${lightness}%)`;
+  function hslToRgb(h, s, l) {
+    h = ((Number(h) % 360) + 360) % 360;
+    s = Math.max(0, Math.min(100, Number(s))) / 100;
+    l = Math.max(0, Math.min(100, Number(l))) / 100;
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = l - c / 2;
+    let r = 0, g = 0, b = 0;
+    if (h < 60) [r, g, b] = [c, x, 0];
+    else if (h < 120) [r, g, b] = [x, c, 0];
+    else if (h < 180) [r, g, b] = [0, c, x];
+    else if (h < 240) [r, g, b] = [0, x, c];
+    else if (h < 300) [r, g, b] = [x, 0, c];
+    else [r, g, b] = [c, 0, x];
+    return [r, g, b].map((v) => Math.round((v + m) * 255));
   }
 
-  function membershipAtLevel(data, level) {
-    return (data.communities || []).find((c) => Number(c.level || 0) === Number(level)) || null;
+  function rgbToHex(rgb) {
+    return `#${rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  // Sigma/WebGL is most reliable with hex node colors. Canvas community fills
+  // continue to use hsla() so translucent overlaps blend naturally.
+  function solidColorForCommunity(id, lightness = 47, saturation = 68) {
+    return rgbToHex(hslToRgb(communityHueResolved(id), saturation, lightness));
+  }
+
+  function frontierMemberships(data, depth) {
+    const eligible = (data.communities || []).filter((c) => Number(c.level || 0) <= Number(depth));
+    if (!eligible.length) return [];
+    const deepest = Math.max(...eligible.map((c) => Number(c.level || 0)));
+    return eligible.filter((c) => Number(c.level || 0) === deepest);
+  }
+
+  function frontierMembership(data, depth) {
+    const memberships = frontierMemberships(data, depth);
+    return memberships.length ? memberships[0] : null;
+  }
+
+  function blendedFrontierNodeColor(data, depth, { dimmed = false } = {}) {
+    const memberships = frontierMemberships(data, depth);
+    if (!memberships.length) return data.color || "#88939d";
+    const lightness = dimmed ? 76 : 47;
+    const saturation = dimmed ? 34 : 68;
+    const colors = memberships.map((c) => hslToRgb(communityHueResolved(c.id), saturation, lightness));
+    const avg = [0, 1, 2].map((i) => colors.reduce((sum, rgb) => sum + rgb[i], 0) / colors.length);
+    return rgbToHex(avg);
   }
 
   function convexHull(points) {
@@ -168,9 +210,9 @@
     };
   }
 
-  // Builds hulls for every Leiden community. Community KG uses STRICT level semantics:
-  // at L2 only actual L2 communities and their member entities are rendered. Branches
-  // that stop at L0/L1 are intentionally hidden when the viewer moves deeper.
+  // Builds hulls for every Leiden community and a hierarchy frontier for each zoom depth.
+  // At depth L2, nodes use their deepest available membership up to L2. Branches that
+  // stop at L0/L1 remain as leaf communities rather than disappearing.
   function buildCommunityHulls() {
     state.communityHulls = [];
     state.communityHullById = new Map();
@@ -192,14 +234,16 @@
       const grouped = new Map();
       for (const nodeId of graphNodes) {
         const attrs = state.graph.getNodeAttributes(nodeId);
-        const memberships = (attrs.communities || [])
-          .filter((c) => Number(c.level || 0) <= depth)
-          .sort((a, b) => Number(a.level || 0) - Number(b.level || 0));
+        const memberships = frontierMemberships(attrs, depth);
         if (!memberships.length) continue;
-        const chosen = memberships[memberships.length - 1];
-        const id = String(chosen.id);
-        if (!grouped.has(id)) grouped.set(id, []);
-        grouped.get(id).push(nodeId);
+        // Usually Hierarchical Leiden gives one membership at a frontier depth.
+        // If imported data contains overlapping memberships, add the node to each
+        // hull so translucent gradients genuinely blend in the overlap.
+        for (const membership of memberships) {
+          const id = String(membership.id);
+          if (!grouped.has(id)) grouped.set(id, []);
+          grouped.get(id).push(nodeId);
+        }
       }
 
       const frontier = [];
@@ -221,7 +265,9 @@
   function activeCommunityLevel() {
     if (state.communityLevelMode !== "auto") return Number(state.communityLevelMode);
     const maxLevel = Math.max(0, state.communityFrontiers.length - 1);
-    return Math.min(state.currentLod, maxLevel);
+    // Community hierarchy follows camera zoom: zoomed out = L0, zoomed in = L1 → L2 → L3.
+    // The separate Detail control may change entity/edge density without reversing hierarchy depth.
+    return Math.min(state.autoLod, maxLevel);
   }
 
   function makePolygonPath(ctx, points) {
@@ -235,10 +281,11 @@
   function drawGradientCommunity(ctx, community, viewportPoints, selected) {
     const cx = viewportPoints.reduce((sum, p) => sum + p.x, 0) / viewportPoints.length;
     const cy = viewportPoints.reduce((sum, p) => sum + p.y, 0) / viewportPoints.length;
-    const centerAlpha = selected ? 0.30 : 0.19;
-    const midAlpha = selected ? 0.17 : 0.10;
-    const edgeAlpha = selected ? 0.075 : 0.025;
-    const outlineAlpha = selected ? 0.78 : 0.22;
+    const centerAlpha = selected ? 0.25 : 0.135;
+    const midAlpha = selected ? 0.135 : 0.055;
+    const edgeAlpha = selected ? 0.035 : 0.006;
+    // Keep ordinary community boundaries nearly invisible; the gradient itself defines the group.
+    const outlineAlpha = selected ? 0.34 : 0.028;
 
     if (viewportPoints.length === 1) {
       const radius = selected ? 30 : 22;
@@ -252,7 +299,7 @@
       ctx.fillStyle = g;
       ctx.fill();
       ctx.strokeStyle = colorForCommunity(community.id, outlineAlpha, 54);
-      ctx.lineWidth = selected ? 2.5 : 0.9;
+      ctx.lineWidth = selected ? 1.5 : 0.35;
       ctx.stroke();
       return { cx, cy };
     }
@@ -276,7 +323,7 @@
       ctx.fillStyle = g;
       ctx.fill();
       ctx.strokeStyle = colorForCommunity(community.id, outlineAlpha, 54);
-      ctx.lineWidth = selected ? 2.5 : 0.9;
+      ctx.lineWidth = selected ? 1.5 : 0.35;
       ctx.stroke();
       return { cx, cy };
     }
@@ -306,7 +353,7 @@
 
     makePolygonPath(ctx, inflated);
     ctx.strokeStyle = colorForCommunity(community.id, outlineAlpha, 54);
-    ctx.lineWidth = selected ? 2.6 : 0.9;
+    ctx.lineWidth = selected ? 1.6 : 0.35;
     ctx.stroke();
     return { cx, cy };
   }
@@ -331,7 +378,9 @@
     if (!state.renderer || !state.communityFrontiers.length) return;
 
     const targetLevel = activeCommunityLevel();
-    const exactLevelCommunities = state.communityHulls.filter((c) => Number(c.level) === Number(targetLevel));
+    // Frontier = deepest available community on each branch at the requested depth.
+    // Branches that end early stay represented instead of disappearing at deeper zoom levels.
+    const frontierCommunities = state.communityFrontiers[targetLevel] || [];
     const candidates = [];
     const zoomFactor = state.zoomFactor || 1;
     const addCandidate = (community, selected = false) => {
@@ -352,14 +401,14 @@
       candidates.push({ community, viewportPoints, area: Math.max(1, (maxX - minX) * (maxY - minY)), selected });
     };
 
-    for (const community of exactLevelCommunities) addCandidate(community, community.id === state.selectedCommunity);
-    if (state.selectedCommunity && !exactLevelCommunities.some((c) => c.id === state.selectedCommunity)) {
+    for (const community of frontierCommunities) addCandidate(community, community.id === state.selectedCommunity);
+    if (state.selectedCommunity && !frontierCommunities.some((c) => c.id === state.selectedCommunity)) {
       const selectedHull = state.communityHullById.get(state.selectedCommunity);
       if (selectedHull) addCandidate(selectedHull, true);
     }
 
     candidates.sort((a, b) => Number(b.selected) - Number(a.selected) || b.area - a.area);
-    const maxDraw = targetLevel === 0 ? 1800 : targetLevel === 1 ? 700 : targetLevel === 2 ? 900 : 200;
+    const maxDraw = targetLevel === 0 ? 1200 : targetLevel === 1 ? 1100 : targetLevel === 2 ? 1300 : 1450;
     const visible = candidates.slice(0, maxDraw);
     // Draw larger regions first so smaller/finer frontier groups remain legible on top.
     visible.sort((a, b) => Number(a.selected) - Number(b.selected) || b.area - a.area);
@@ -382,9 +431,11 @@
   }
 
   function autoLodForZoom(zoomFactor) {
-    if (zoomFactor < 1.6) return 0;
-    if (zoomFactor < 3.6) return 1;
-    if (zoomFactor < 8.0) return 2;
+    // Sigma camera ratio gets smaller when zooming IN, therefore zoomFactor grows.
+    // So the hierarchy direction is intentionally: far/zoomed-out L0 → L1 → L2 → close/zoomed-in L3.
+    if (zoomFactor < 1.45) return 0;
+    if (zoomFactor < 2.8) return 1;
+    if (zoomFactor < 5.6) return 2;
     return 3;
   }
 
@@ -410,22 +461,19 @@
   function nodeIsVisible(node, data) {
     if (!nodePassesType(data)) return false;
 
+    if (node === state.selectedNode || state.searchMatch === node) return true;
+    if (state.selectedNode && state.selectedNeighbors.has(node)) return true;
+
     if (state.viewMode === "community" && state.payload?.meta?.has_communities) {
       const level = activeCommunityLevel();
-      const membership = membershipAtLevel(data, level);
-      // Strict hierarchy view: entities without a community at the active level disappear.
+      // Use the deepest community available at-or-above the requested hierarchy depth.
+      // A branch that has no L3 child remains an L2/L1/L0 leaf rather than vanishing.
+      const membership = frontierMembership(data, level);
       if (!membership) return false;
-      if (node === state.selectedNode || state.searchMatch === node) return true;
-      if (state.selectedNode && state.selectedNeighbors.has(node)) return true;
-      // Retain semantic detail inside the active hierarchy level. Deeper levels naturally
-      // reveal more entities, while still excluding entities that do not exist at that level.
-      const effectiveLod = Math.max(state.currentLod, level);
-      return Number(data.lod || 0) <= effectiveLod;
+      // Zoom controls how many actual entity nodes are revealed inside those community regions.
+      return Number(data.lod || 0) <= state.currentLod;
     }
 
-    if (node === state.selectedNode) return true;
-    if (state.selectedNode && state.selectedNeighbors.has(node)) return true;
-    if (state.searchMatch === node) return true;
     return Number(data.lod || 0) <= state.currentLod;
   }
 
@@ -440,8 +488,7 @@
       }
 
       if (state.viewMode === "community" && state.payload?.meta?.has_communities) {
-        const membership = membershipAtLevel(data, activeCommunityLevel());
-        if (membership) res.color = solidColorForCommunity(membership.id);
+        res.color = blendedFrontierNodeColor(data, activeCommunityLevel());
       }
 
       if (node === state.selectedNode) {
@@ -456,7 +503,9 @@
           res.forceLabel = true;
           res.size = Math.max(data.size * 1.1, data.size + 0.8);
         } else {
-          res.color = "#c9d0d6";
+          res.color = state.viewMode === "community"
+            ? blendedFrontierNodeColor(data, activeCommunityLevel(), { dimmed: true })
+            : "#c9d0d6";
           res.label = "";
         }
       } else {
@@ -733,16 +782,19 @@
     ui.communityLevel.disabled = !isCommunity;
     ui.communityLevelControl.hidden = !isCommunity;
     ui.communityCanvas.hidden = !isCommunity;
+    ui.legend.innerHTML = isCommunity
+      ? '<span class="legend-item"><span class="legend-swatch community-gradient-swatch"></span>Node color = current community</span><span class="legend-item">Gradient overlap = blended colors</span>'
+      : state.typeLegendHtml;
 
     if (isCommunity) {
-      ui.pageSubtitle.textContent = "Entity · Relationship · Hierarchical Leiden Community · Strict Level Zoom";
+      ui.pageSubtitle.textContent = "Entity · Relationship · Hierarchical Leiden Community · Frontier Semantic Zoom";
       ui.communityStatLabel.textContent = "Communities";
       ui.statCommunities.textContent = state.payload?.meta?.has_communities
         ? fmt.format(state.payload.meta.community_count || 0)
         : "Pending";
-      ui.graphHelp.textContent = "Wheel: zoom · Drag: pan · L0 → L1 → L2 → L3 strict hierarchy · Same-community nodes share color";
+      ui.graphHelp.textContent = "Wheel: zoom · Drag: pan · 축소 L0 → 확대 L1 → L2 → L3 · Same-community nodes share color";
       ui.viewNote.textContent = state.payload?.meta?.has_communities
-        ? `Community KG 모드입니다. 같은 현재-Level Community의 Entity는 같은 색을 사용합니다. Auto에서는 확대할수록 L0 → L1 → L2 → L3으로 이동하며, 해당 Level Community가 없는 Entity는 숨겨집니다. Community-aware layout은 모드 전환 때 적용되고 Zoom 중 좌표는 고정됩니다.`
+        ? `Community KG 모드입니다. 가장 축소된 상태는 L0이며 확대할수록 L1 → L2 → L3으로 세분화됩니다. 노드는 현재 hierarchy frontier의 Community 색을 사용하고, 하위 Community가 없는 branch는 상위 leaf Community 색을 유지해 사라지지 않습니다. 반투명 gradient가 겹치는 영역은 자연스럽게 색이 혼합되며 윤곽선은 최소화했습니다.`
         : "Community KG 모드이지만 Community 데이터가 없습니다.";
     } else {
       ui.pageSubtitle.textContent = "Entity · Relationship · Semantic Zoom";
@@ -783,9 +835,10 @@
     for (const node of payload.nodes) {
       if (!colors.has(node.type)) colors.set(node.type, node.color);
     }
-    ui.legend.innerHTML = [...colors.entries()].slice(0, 12).map(([type, color]) => `
+    state.typeLegendHtml = [...colors.entries()].slice(0, 12).map(([type, color]) => `
       <span class="legend-item"><span class="legend-swatch" style="background:${escapeHtml(color)}"></span>${escapeHtml(type)}</span>
     `).join("");
+    ui.legend.innerHTML = state.typeLegendHtml;
   }
 
   function buildGraph(payload) {
@@ -930,7 +983,7 @@
 
       ui.graphError.hidden = true;
       ui.graphError.style.display = "none";
-      ui.loadStatus.textContent = payload.meta.has_communities ? "Graph + strict hierarchy ready · v3" : "Graph ready · communities pending";
+      ui.loadStatus.textContent = payload.meta.has_communities ? "Graph + community frontier ready · v4" : "Graph ready · communities pending";
     } catch (error) {
       console.error(error);
       const fileHint = location.protocol === "file:"

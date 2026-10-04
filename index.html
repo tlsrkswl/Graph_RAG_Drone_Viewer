@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="description" content="Interactive Drone Knowledge Graph and hierarchical Leiden Community viewer" />
   <title>Drone Knowledge Graph Viewer</title>
-  <link rel="stylesheet" href="./style.css?v=20261003-strict-hierarchy-3" />
+  <link rel="stylesheet" href="./style.css?v=20261004-community-frontier-4" />
 </head>
 <body data-view="kg">
   <header class="topbar">
@@ -69,7 +69,7 @@
             <option value="0">L0 · Root / Coarse</option>
             <option value="1">L1 · Sub-community</option>
             <option value="2">L2 · Fine</option>
-            <option value="3">L3 · Finest only</option>
+            <option value="3">L3 · Finest</option>
           </select>
         </label>
 
@@ -112,11 +112,11 @@
 
   <footer>
     <span>Graph source: knowledge_graph.json + communities.jsonl + community_reports.jsonl</span>
-    <span>Renderer: Sigma.js + Graphology · Strict Community Hierarchy build 2026-10-03 v3</span>
+    <span>Renderer: Sigma.js + Graphology · Community Frontier build 2026-10-04 v4</span>
   </footer>
 
   <script src="https://cdn.jsdelivr.net/npm/graphology@0.26.0/dist/graphology.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/sigma@3.0.3/dist/sigma.min.js"></script>
-  <script src="./app.js?v=20261003-strict-hierarchy-3"></script>
+  <script src="./app.js?v=20261004-community-frontier-4"></script>
 </body>
 </html>

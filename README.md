@@ -1,25 +1,37 @@
-# Graph_RAG_Drone_Viewer · Community Frontier v2
+# Graph_RAG_Drone_Viewer · Community Frontier v4
 
 하나의 GitHub Pages에서 두 가지 보기를 전환합니다.
 
-- **Knowledge Graph**: 기존 `graphviz-sfdp` 좌표에서 Entity + Relationship 표시
-- **Community KG**: Community-aware 고정 좌표에서 Hierarchical Leiden Community를 함께 표시
+- **Knowledge Graph**: Entity type 색 + 기존 KG layout
+- **Community KG**: Community 색 + community-aware layout + hierarchical semantic zoom
 
-## v2 패치 내용
+## v4 핵심 동작
 
-1. **Hierarchy frontier semantic zoom**
-   - 단순히 정확한 Level만 표시하지 않습니다.
-   - 확대할수록 각 Entity가 실제로 가진 가장 깊은 Community까지 세분화됩니다.
-   - 예를 들어 어떤 branch가 L1에서 끝나면 L2/L3 확대에서도 그 L1 Community가 사라지지 않습니다.
+1. **Zoom 방향 수정**
+   - 가장 축소된 상태: **L0 (coarse/root)**
+   - 확대: **L1 → L2 → L3 (finer)**
 
-2. **Community gradient**
-   - Community 중심부가 상대적으로 진하고 외곽으로 갈수록 투명해집니다.
-   - gradient는 Community hull 내부로 clip됩니다.
+2. **Hierarchy frontier**
+   - 정확히 같은 Level이 없다고 Entity를 삭제하지 않습니다.
+   - L3 자식이 없는 branch는 L2/L1/L0의 leaf Community로 남습니다.
+   - 따라서 확대할 때 그래프 양쪽의 branch가 갑자기 사라지는 문제가 줄어듭니다.
 
-3. **Community-aware layout**
-   - 일반 KG와 Community KG가 서로 다른 좌표를 사용합니다.
-   - Community KG에서는 Hierarchical Leiden anchor를 이용해 같은 Community Entity가 공간적으로 더 가까워지도록 미리 계산했습니다.
-   - Community KG 안에서 확대/축소할 때 Node 좌표는 다시 계산하지 않습니다. 즉 zoom 중 mental map은 유지됩니다.
+3. **Community node color**
+   - Community KG에서 Node 색 = 현재 hierarchy frontier의 Community 색입니다.
+   - Sigma/WebGL 안정성을 위해 Node 색은 HSL 문자열이 아니라 HEX로 변환합니다.
+   - 같은 frontier depth에서 복수 Community membership이 존재하면 색을 RGB 평균으로 혼합합니다.
+
+4. **Gradient + overlap blending**
+   - Community 중심부는 조금 진하고 외곽으로 갈수록 거의 투명해집니다.
+   - Community gradient가 공간적으로 겹치면 Canvas alpha blending으로 색이 자연스럽게 섞입니다.
+
+5. **부드러운 윤곽선**
+   - 일반 Community의 외곽선은 거의 보이지 않게 낮췄습니다.
+   - 선택한 Community만 약하게 경계를 강조합니다.
+
+6. **Community-aware fixed layout**
+   - 일반 KG와 Community KG는 서로 다른 고정 좌표를 사용합니다.
+   - Community KG 안에서 zoom하는 동안 Node 좌표는 바뀌지 않습니다.
 
 ## GitHub에 교체할 파일
 
@@ -35,7 +47,7 @@ Graph_RAG_Drone_Viewer/
    └─ graph.json
 ```
 
-GitHub Pages가 이미 `main / (root)`로 설정되어 있다면 Pages 설정은 다시 할 필요가 없습니다.
+이번 v4는 `graph.json` 형식 자체를 바꾸지 않았으므로, 이미 동일한 Community 데이터가 올라가 있다면 실제 기능 수정은 `index.html`, `app.js`, `style.css`만 교체해도 됩니다. 다만 ZIP에는 완전한 세트를 넣어 두었습니다.
 
 - 기본 KG: `.../Graph_RAG_Drone_Viewer/#kg`
 - Community KG: `.../Graph_RAG_Drone_Viewer/#community`
